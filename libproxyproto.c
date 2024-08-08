@@ -46,15 +46,17 @@ static int (*sys_getpeername)(int sockfd, struct sockaddr *addr,
                               socklen_t *addrlen);
 #endif
 #ifdef LIBPROXYPROTO_UDP_ENABLED
-static ssize_t (*sys_recv)(int sockfd, void *buf, size_t len, int flags);
 static ssize_t (*sys_recvfrom)(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
-static ssize_t (*sys_recvmsg)(int sockfd, struct msghdr *msg, int flags);
 #endif
 #pragma GCC diagnostic ignored "-Wpedantic"
 int __attribute__((visibility("default")))
 accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 int __attribute__((visibility("default")))
 accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+ssize_t __attribute__((visibility("default")))
+recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
+#endif
 #ifdef GETPEERNAME_CACHE_ENABLED
 int __attribute__((visibility("default"))) close(int fd);
 int __attribute__((visibility("default")))
@@ -76,6 +78,10 @@ static int version = LIBPROXYPROTO_V1 | LIBPROXYPROTO_V2;
 #define CACHE_MAX 1024
 static struct sockaddr *addr_cache[CACHE_MAX + 1] = {0};
 #endif
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+#define FDPROXYMODE_MAX 1023
+static char fd_proxymode[FDPROXYMODE_MAX + 1] = {0};
+#endif
 
 void _init(void) {
   const char *err;
@@ -96,6 +102,9 @@ void _init(void) {
 #pragma GCC diagnostic ignored "-Wpedantic"
   sys_accept = dlsym(RTLD_NEXT, "accept");
   sys_accept4 = dlsym(RTLD_NEXT, "accept4");
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+  sys_recvfrom = dlsym(RTLD_NEXT, "recvfrom");
+#endif
 #ifdef GETPEERNAME_CACHE_ENABLED
   sys_close = dlsym(RTLD_NEXT, "close");
   sys_getpeername = dlsym(RTLD_NEXT, "getpeername");
@@ -227,20 +236,85 @@ LIBPROXYPROTO_DONE:
   return fd;
 }
 
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen)
+{
+  struct sockaddr *tmp_addr;
+  socklen_t tmp_addrlen;
+  
+  /* fd proxy mode is not zero, pass through socket to the application */
+  if (debug) fprintf(stderr, "sockfd %d\n", sockfd);
+  if (debug) fprintf(stderr, "proxy mode %d\n", fd_proxymode[sockfd]);
+  if(fd_proxymode[sockfd] != 0) goto PROXY_PASSTHROUGH_MODE;
+  
+  /* fd proxy mode is zero, we try to read the PROXY header */
+  
+  tmp_addrlen = sizeof(struct sockaddr_storage);
+  tmp_addr = calloc(1, tmp_addrlen);
+  if (!tmp_addr)
+    return -1;
+  
+  if (read_evt(sockfd, tmp_addr, sizeof(struct sockaddr_storage), tmp_addrlen) <=
+      0) {
+    if (debug)
+      (void)fprintf(stderr, "error: not proxy protocol\n");
+    
+    if (!must_use_protocol_header)
+      goto LIBPROXYPROTO_DONE;
+    
+    if (debug)
+      (void)fprintf(stderr, "dropping connection\n");
+    
+    (void)close(sockfd);
+    errno = ECONNABORTED;
+    return -1;
+  }
+  
+LIBPROXYPROTO_DONE:
+
+  /* copy the result to the caller */
+  if (src_addr && *addrlen) {
+    memcpy(src_addr, tmp_addr, *addrlen > tmp_addrlen ? tmp_addrlen : *addrlen);
+    *addrlen = tmp_addrlen;
+  }
+  
+  fd_proxymode[sockfd] = 'p';
+  
+  PROXY_PASSTHROUGH_MODE:
+  return sys_recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
+}
+#endif
+
 #ifdef GETPEERNAME_CACHE_ENABLED
+#define GETPEERNAME_CACHE_OR_LIBPROXYPROTO_UDP_ENABLED
+#endif
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+#define GETPEERNAME_CACHE_OR_LIBPROXYPROTO_UDP_ENABLED
+#endif
+
+#ifdef GETPEERNAME_CACHE_OR_LIBPROXYPROTO_UDP_ENABLED
 int close(int fd) {
   int ret = sys_close(fd);
 
-  if (ret == 0 && addr_cache[fd] != NULL) {
-    if (debug)
-      (void)fprintf(stderr, "close(): freeing cache\n");
-    free(addr_cache[fd]);
-    addr_cache[fd] = NULL;
+  if (ret == 0) {
+#ifdef GETPEERNAME_CACHE_ENABLED
+    if (addr_cache[fd] != NULL) {
+      if (debug)
+        (void)fprintf(stderr, "close(): freeing cache\n");
+      free(addr_cache[fd]);
+      addr_cache[fd] = NULL;
+    }
+#endif
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+    fd_proxymode[fd] = 0;
+#endif
   }
 
   return ret;
 }
+#endif
 
+#ifdef GETPEERNAME_CACHE_ENABLED
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
 
   if (addr_cache[sockfd] == NULL)
@@ -320,6 +394,8 @@ static int read_evt(int fd, struct sockaddr *from, socklen_t ofromlen,
     case 0x01: /* PROXY command */
       switch (hdr.v2.fam) {
       case 0x11: /* TCPv4 */
+        /* fall-through */
+      case 0x12: /* UDPv4 */
         if (ofromlen < fromlen)
           goto done;
         if (debug)
@@ -336,6 +412,8 @@ static int read_evt(int fd, struct sockaddr *from, socklen_t ofromlen,
                         ntohs(((struct sockaddr_in *)from)->sin_port));
         goto done;
       case 0x21: /* TCPv6 */
+        /* fall-through */
+      case 0x22: /* UDPv6 */
         if (ofromlen < fromlen)
           goto done;
         ((struct sockaddr_in6 *)from)->sin6_family = AF_INET6;

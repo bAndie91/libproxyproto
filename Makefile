@@ -11,9 +11,12 @@ endif
 
 LIBPROXYPROTO_GETPEERNAME_CACHE ?= ENABLED
 
+LIBPROXYPROTO_UDP ?= ENABLED
+
 libproxyproto:
 	$(CC) -Wall -Wextra -pedantic -D_GNU_SOURCE -nostartfiles -shared -fpic -fPIC \
 		-DGETPEERNAME_CACHE_$(LIBPROXYPROTO_GETPEERNAME_CACHE) \
+		-DLIBPROXYPROTO_UDP_$(LIBPROXYPROTO_UDP) \
 		-fvisibility=hidden \
 		-Wconversion -Wshadow \
 		-Wpointer-arith -Wcast-qual \

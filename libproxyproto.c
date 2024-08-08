@@ -45,6 +45,11 @@ static int (*sys_close)(int fd);
 static int (*sys_getpeername)(int sockfd, struct sockaddr *addr,
                               socklen_t *addrlen);
 #endif
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+static ssize_t (*sys_recv)(int sockfd, void *buf, size_t len, int flags);
+static ssize_t (*sys_recvfrom)(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
+static ssize_t (*sys_recvmsg)(int sockfd, struct msghdr *msg, int flags);
+#endif
 #pragma GCC diagnostic ignored "-Wpedantic"
 int __attribute__((visibility("default")))
 accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);

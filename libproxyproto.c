@@ -245,6 +245,7 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *
 {
   struct sockaddr *tmp_addr;
   socklen_t tmp_addrlen;
+  ssize_t ret;
   
   /* fd proxy mode is not zero, pass socket to the application */
   if(fd_proxymode[sockfd] != 0) goto PROXY_PASSTHROUGH_MODE;
@@ -274,22 +275,36 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *
   
 LIBPROXYPROTO_DONE:
 
-  /* copy the result to the caller */
-  if (src_addr && *addrlen) {
-    memcpy(src_addr, tmp_addr, *addrlen > tmp_addrlen ? tmp_addrlen : *addrlen);
-    *addrlen = tmp_addrlen;
+  fd_proxymode[sockfd] = 'p';
+
+#ifndef GETPEERNAME_CACHE_ENABLED
+#error Must enable GETPEERNAME_CACHE for LIBPROXYPROTO_UDP
+#endif
+  /* store in the cache if possible */
+  if (sockfd < CACHE_MAX) {
+    if (addr_cache[sockfd] != NULL)
+      free(addr_cache[sockfd]);
+    addr_cache[sockfd] = tmp_addr;
+  } else {
+    free(tmp_addr);
   }
   
-  fd_proxymode[sockfd] = 'p';
-  
   PROXY_PASSTHROUGH_MODE:
-  return sys_recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
+  ret = sys_recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
+  
+  /* copy the result to the caller */
+  if (sockfd < CACHE_MAX && addr_cache[sockfd]) {
+    memcpy(src_addr, addr_cache[sockfd], *addrlen);
+  }
+  
+  return ret;
 }
 
 ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
 {
   struct sockaddr *tmp_addr;
   socklen_t tmp_addrlen;
+  ssize_t ret;
   
   /* fd proxy mode is not zero, pass socket to the application */
   if(fd_proxymode[sockfd] != 0) goto PROXY_PASSTHROUGH_MODE;
@@ -318,36 +333,24 @@ ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
   }
   
 LIBPROXYPROTO_DONE:
+  
   fd_proxymode[sockfd] = 'p';
+
+  /* store in the cache if possible */
+  if (sockfd < CACHE_MAX) {
+    if (addr_cache[sockfd] != NULL)
+      free(addr_cache[sockfd]);
+    addr_cache[sockfd] = tmp_addr;
+  } else {
+    free(tmp_addr);
+  }
   
   PROXY_PASSTHROUGH_MODE:
-  return sys_recvmsg(sockfd, msg, flags);
-}
-#endif
-
-#ifdef GETPEERNAME_CACHE_ENABLED
-#define GETPEERNAME_CACHE_OR_LIBPROXYPROTO_UDP_ENABLED
-#endif
-#ifdef LIBPROXYPROTO_UDP_ENABLED
-#define GETPEERNAME_CACHE_OR_LIBPROXYPROTO_UDP_ENABLED
-#endif
-
-#ifdef GETPEERNAME_CACHE_OR_LIBPROXYPROTO_UDP_ENABLED
-int close(int fd) {
-  int ret = sys_close(fd);
-
-  if (ret == 0) {
-#ifdef GETPEERNAME_CACHE_ENABLED
-    if (addr_cache[fd] != NULL) {
-      if (debug)
-        (void)fprintf(stderr, "close(): freeing cache\n");
-      free(addr_cache[fd]);
-      addr_cache[fd] = NULL;
-    }
-#endif
-#ifdef LIBPROXYPROTO_UDP_ENABLED
-    fd_proxymode[fd] = 0;
-#endif
+  ret = sys_recvmsg(sockfd, msg, flags);
+  
+  /* copy the result to the caller */
+  if (sockfd < CACHE_MAX && addr_cache[sockfd]) {
+    memcpy(msg->msg_name, addr_cache[sockfd], msg->msg_namelen);
   }
 
   return ret;
@@ -355,6 +358,24 @@ int close(int fd) {
 #endif
 
 #ifdef GETPEERNAME_CACHE_ENABLED
+int close(int fd) {
+  int ret = sys_close(fd);
+
+  if (ret == 0) {
+    if (addr_cache[fd] != NULL) {
+      if (debug)
+        (void)fprintf(stderr, "close(): freeing cache\n");
+      free(addr_cache[fd]);
+      addr_cache[fd] = NULL;
+    }
+#ifdef LIBPROXYPROTO_UDP_ENABLED
+    fd_proxymode[fd] = 0;
+#endif
+  }
+
+  return ret;
+}
+
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
 
   if (addr_cache[sockfd] == NULL)

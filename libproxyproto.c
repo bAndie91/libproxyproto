@@ -47,6 +47,7 @@ static int (*sys_getpeername)(int sockfd, struct sockaddr *addr,
 #endif
 #ifdef LIBPROXYPROTO_UDP_ENABLED
 static ssize_t (*sys_recvfrom)(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
+static ssize_t (*sys_recvmsg)(int sockfd, struct msghdr *msg, int flags);
 #endif
 #pragma GCC diagnostic ignored "-Wpedantic"
 int __attribute__((visibility("default")))
@@ -56,6 +57,8 @@ accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
 #ifdef LIBPROXYPROTO_UDP_ENABLED
 ssize_t __attribute__((visibility("default")))
 recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
+ssize_t __attribute__((visibility("default")))
+recvmsg(int sockfd, struct msghdr *msg, int flags);
 #endif
 #ifdef GETPEERNAME_CACHE_ENABLED
 int __attribute__((visibility("default"))) close(int fd);
@@ -104,6 +107,7 @@ void _init(void) {
   sys_accept4 = dlsym(RTLD_NEXT, "accept4");
 #ifdef LIBPROXYPROTO_UDP_ENABLED
   sys_recvfrom = dlsym(RTLD_NEXT, "recvfrom");
+  sys_recvmsg = dlsym(RTLD_NEXT, "recvmsg");
 #endif
 #ifdef GETPEERNAME_CACHE_ENABLED
   sys_close = dlsym(RTLD_NEXT, "close");
@@ -242,9 +246,7 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *
   struct sockaddr *tmp_addr;
   socklen_t tmp_addrlen;
   
-  /* fd proxy mode is not zero, pass through socket to the application */
-  if (debug) fprintf(stderr, "sockfd %d\n", sockfd);
-  if (debug) fprintf(stderr, "proxy mode %d\n", fd_proxymode[sockfd]);
+  /* fd proxy mode is not zero, pass socket to the application */
   if(fd_proxymode[sockfd] != 0) goto PROXY_PASSTHROUGH_MODE;
   
   /* fd proxy mode is zero, we try to read the PROXY header */
@@ -282,6 +284,44 @@ LIBPROXYPROTO_DONE:
   
   PROXY_PASSTHROUGH_MODE:
   return sys_recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
+}
+
+ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
+{
+  struct sockaddr *tmp_addr;
+  socklen_t tmp_addrlen;
+  
+  /* fd proxy mode is not zero, pass socket to the application */
+  if(fd_proxymode[sockfd] != 0) goto PROXY_PASSTHROUGH_MODE;
+  
+  /* fd proxy mode is zero, we try to read the PROXY header */
+  
+  tmp_addrlen = sizeof(struct sockaddr_storage);
+  tmp_addr = calloc(1, tmp_addrlen);
+  if (!tmp_addr)
+    return -1;
+  
+  if (read_evt(sockfd, tmp_addr, sizeof(struct sockaddr_storage), tmp_addrlen) <=
+      0) {
+    if (debug)
+      (void)fprintf(stderr, "error: not proxy protocol\n");
+    
+    if (!must_use_protocol_header)
+      goto LIBPROXYPROTO_DONE;
+    
+    if (debug)
+      (void)fprintf(stderr, "dropping connection\n");
+    
+    (void)close(sockfd);
+    errno = ECONNABORTED;
+    return -1;
+  }
+  
+LIBPROXYPROTO_DONE:
+  fd_proxymode[sockfd] = 'p';
+  
+  PROXY_PASSTHROUGH_MODE:
+  return sys_recvmsg(sockfd, msg, flags);
 }
 #endif
 
